@@ -43,6 +43,11 @@ fi
 : ${cache_dir:="/var/cache/$PROGNAME"}
 
 sync_users() {
+    # Fix permissions if run as root
+    if [ "$(id -u)" -eq 0 ] && [ -d "$cache_dir" ]; then
+        chown sshd:nogroup "$cache_dir" 2>/dev/null || :
+        chmod 700 "$cache_dir" 2>/dev/null || :
+    fi
     log info "Starting user sync mode"
     IFS=','
     set -f
