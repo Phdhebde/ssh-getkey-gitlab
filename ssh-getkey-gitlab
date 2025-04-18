@@ -14,11 +14,11 @@
 #
 # Please report issues at <https://github.com/phdhebde/ssh-getkey-gitlab/issues>.
 
-# Patched version: GitLab IAM + Group check + auto account creation + title filter
+# Patched version: GitLab IAM + Group check + auto account creation + title filter + ignore SSL
 set -eu
 
 readonly PROGNAME='ssh-getkey-gitlab'
-readonly VERSION='0.3.1'
+readonly VERSION='0.2.1'
 readonly CONF_FILE='/etc/ssh/getkey-gitlab.conf'
 
 log() {
@@ -66,15 +66,17 @@ if [ "$uid" -lt "$minimum_uid" ]; then
 fi
 
 # Find GitLab user ID by username
-user_json=$(wget -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users?username=$uname") || die "failed to get user info from GitLab"
+user_json=$(wget --no-check-certificate -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users?username=$uname") || die "failed to get user info from GitLab"
 user_id=$(echo "$user_json" | grep -o '"id":[0-9]\+' | head -n1 | cut -d: -f2)
 [ -z "$user_id" ] && die "user $uname not found in GitLab"
 
 # Check group membership
-IFS=',' read -r -a group_ids <<< "$allowed_groups"
+IFS=','
+set -f  # disable globbing
+group_ids=$(echo "$allowed_groups" | tr ',' ' ')
 is_member=false
-for gid in "${group_ids[@]}"; do
-    code=$(wget -S -q -O /dev/null -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/groups/$gid/members/$user_id" 2>&1 | awk '/^  HTTP/{print $2}')
+for gid in $group_ids; do
+    code=$(wget --no-check-certificate -S -q -O /dev/null -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/groups/$gid/members/$user_id" 2>&1 | awk '/^  HTTP/{print $2}')
     if [ "$code" = 200 ]; then
         is_member=true
         break
@@ -88,7 +90,9 @@ fi
 
 cache_file="$cache_dir/$uname.keys"
 src='GitLab'
-keys_json=$(wget -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users/$user_id/keys") || {
+keys_json=""
+keys=""
+if ! keys_json=$(wget --no-check-certificate -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users/$user_id/keys"); then
     case "$?" in
         4|7) log warn 'network failure, trying cached keys...';;
         8) log warn 'GitLab error response, trying cached keys...';;
@@ -97,11 +101,13 @@ keys_json=$(wget -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" 
         *) die "wget failed with status code $?";;
     esac
     src='cache'
-    keys=$(cat "$cache_file" 2>/dev/null || :)
-}
-
-# Filter keys by title = ssh-git-sync
-keys=$(echo "$keys_json" | grep -Eo '{[^}]+}' | grep '"title":"ssh-git-sync"' | sed -n 's/.*"key":"\(ssh-[^\"]*\)".*/\1/p')
+    if [ -r "$cache_file" ]; then
+        keys="$(cat "$cache_file")"
+    fi
+else
+    # Filter keys by title = ssh-git-sync
+    keys=$(echo "$keys_json" | grep -Eo '{[^}]+}' | grep '"title":"ssh-git-sync"' | sed -n 's/.*"key":"\(ssh-[^\"]*\)".*/\1/p')
+fi
 
 keys_count=$(echo "$keys" | grep '^ssh' | wc -l)
 log info "loaded $keys_count SSH key(s) from $src for user: $uname"
