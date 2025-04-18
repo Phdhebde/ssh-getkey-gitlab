@@ -12,30 +12,31 @@
 #   AuthorizedKeysCommand /usr/local/bin/ssh-getkey-gitlab
 #   AuthorizedKeysCommandUser sshd
 #
-# Please report issues at <https://github.com/jirutka/ssh-getkey-gitlab/issues>.
+# Please report issues at <https://github.com/phdhebde/ssh-getkey-gitlab/issues>.
+
+# Patched version: GitLab IAM + Group check + auto account creation + title filter
 set -eu
 
 readonly PROGNAME='ssh-getkey-gitlab'
-readonly VERSION='0.2.0'
+readonly VERSION='0.3.1'
 readonly CONF_FILE='/etc/ssh/getkey-gitlab.conf'
 
 log() {
-	logger -s -t sshd -p "auth.$1" "gitlab: $2"
+    logger -s -t sshd -p "auth.$1" "gitlab: $2"
 }
 
 die() {
-	log err "$1"
-	exit 1
+    log err "$1"
+    exit 1
 }
 
-
 case "${1:-}" in
-	-h | --help | '') echo "Usage: $0 [-h | -V] USERNAME"; exit 0;;
-	-V | --version) echo "$PROGNAME $VERSION"; exit 0;;
+    -h | --help | '') echo "Usage: $0 [-h | -V] USERNAME"; exit 0;;
+    -V | --version) echo "$PROGNAME $VERSION"; exit 0;;
 esac
 
 if ! [ -r "$CONF_FILE" ]; then
-	die "file $CONF_FILE does not exist or not readable"
+    die "file $CONF_FILE does not exist or not readable"
 fi
 
 . "$CONF_FILE"
@@ -44,46 +45,74 @@ fi
 : ${cache_dir:="/var/cache/$PROGNAME"}
 
 if [ -z "${gitlab_url:-}" ]; then
-	die "missing \$gitlab_url in $CONF_FILE"
+    die "missing \$gitlab_url in $CONF_FILE"
 fi
 
 uname="$1"
 if ! expr "$uname" : '[a-zA-Z0-9._-]*$' 1>/dev/null; then
-	die "bad characters in username: $uname"
+    die "bad characters in username: $uname"
+fi
+
+# Ensure user account exists
+if ! id "$uname" >/dev/null 2>&1; then
+    log info "Creating system user $uname"
+    useradd -m -s /bin/bash "$uname" || die "could not create user $uname"
 fi
 
 uid=$(id -u "$uname")
 if [ "$uid" -lt "$minimum_uid" ]; then
-	log debug "user $uname ($uid) has uid < $minimum_uid"
-	exit 2
+    log debug "user $uname ($uid) has uid < $minimum_uid"
+    exit 2
+fi
+
+# Find GitLab user ID by username
+user_json=$(wget -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users?username=$uname") || die "failed to get user info from GitLab"
+user_id=$(echo "$user_json" | grep -o '"id":[0-9]\+' | head -n1 | cut -d: -f2)
+[ -z "$user_id" ] && die "user $uname not found in GitLab"
+
+# Check group membership
+IFS=',' read -r -a group_ids <<< "$allowed_groups"
+is_member=false
+for gid in "${group_ids[@]}"; do
+    code=$(wget -S -q -O /dev/null -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/groups/$gid/members/$user_id" 2>&1 | awk '/^  HTTP/{print $2}')
+    if [ "$code" = 200 ]; then
+        is_member=true
+        break
+    fi
+done
+
+if [ "$is_member" != true ]; then
+    log info "user $uname (#$user_id) is not in allowed groups"
+    exit 2
 fi
 
 cache_file="$cache_dir/$uname.keys"
-
 src='GitLab'
-keys=$(wget -q -O - -T "$timeout" "$gitlab_url/users/$uname.keys") || {
-	case "$?" in
-		4|7) log warn 'network failure, trying cached keys...';;
-		8) log warn 'GitLab issued an error response, trying cached keys...';;
-		5) die 'SSL verification failure';;
-		6) die "user $uname not found in GitLab";;
-		*) die "wget failed with status code $?";;
-	esac
-	src='cache'
-	keys=$(cat "$cache_file" 2>/dev/null || :)
+keys_json=$(wget -q -O - -T "$timeout" --header="PRIVATE-TOKEN: $private_token" "$gitlab_url/api/v4/users/$user_id/keys") || {
+    case "$?" in
+        4|7) log warn 'network failure, trying cached keys...';;
+        8) log warn 'GitLab error response, trying cached keys...';;
+        5) die 'SSL verification failure';;
+        6) die "user $uname not found in GitLab";;
+        *) die "wget failed with status code $?";;
+    esac
+    src='cache'
+    keys=$(cat "$cache_file" 2>/dev/null || :)
 }
 
-keys_count=$(echo "$keys" | grep '^ssh' | wc -l)
+# Filter keys by title = ssh-git-sync
+keys=$(echo "$keys_json" | grep -Eo '{[^}]+}' | grep '"title":"ssh-git-sync"' | sed -n 's/.*"key":"\(ssh-[^\"]*\)".*/\1/p')
 
-log info "loaded $keys_count SSH public key(s) from $src for user: $uname"
+keys_count=$(echo "$keys" | grep '^ssh' | wc -l)
+log info "loaded $keys_count SSH key(s) from $src for user: $uname"
 
 if [ "$keys_count" -gt 0 ] && [ "$src" != 'cache' ]; then
-	if [ -d "$cache_dir" ] && [ -w "$cache_dir" ]; then
-		printf '%s\n' "$keys" > "$cache_file"
-		chmod 600 "$cache_file"
-	else
-		log warn "cache_dir $cache_dir does not exist or not writable!"
-	fi
+    if [ -d "$cache_dir" ] && [ -w "$cache_dir" ]; then
+        printf '%s\n' "$keys" > "$cache_file"
+        chmod 600 "$cache_file"
+    else
+        log warn "cache_dir $cache_dir does not exist or not writable!"
+    fi
 fi
 
 printf '%s\n' "$keys"
