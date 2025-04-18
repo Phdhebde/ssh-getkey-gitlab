@@ -32,6 +32,16 @@ die() {
     exit 1
 }
 
+# Load config early for all modes
+if ! [ -r "$CONF_FILE" ]; then
+    echo "$CONF_FILE not readable" >&2
+    exit 1
+fi
+. "$CONF_FILE"
+: ${minimum_uid:=1000}
+: ${timeout:=5}
+: ${cache_dir:="/var/cache/$PROGNAME"}
+
 sync_users() {
     log info "Starting user sync mode"
     IFS=','
@@ -54,14 +64,7 @@ case "${1:-}" in
     --sync-users) sync_users;;
 esac
 
-if ! [ -r "$CONF_FILE" ]; then
-    die "file $CONF_FILE does not exist or not readable"
-fi
 
-. "$CONF_FILE"
-: ${minimum_uid:=1000}
-: ${timeout:=5}
-: ${cache_dir:="/var/cache/$PROGNAME"}
 
 if [ -z "${gitlab_url:-}" ]; then
     die "missing \$gitlab_url in $CONF_FILE"
@@ -78,8 +81,9 @@ if [ "$(id -u)" -eq 0 ] && ! id "$uname" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$uname" || die "could not create user $uname"
 fi
 
+# Optional UID check
 uid=$(id -u "$uname" 2>/dev/null || echo 0)
-if [ "$uid" -lt "$minimum_uid" ]; then
+if [ -n "$minimum_uid" ] && [ "$uid" -lt "$minimum_uid" ]; then
     log debug "user $uname ($uid) has uid < $minimum_uid"
     exit 2
 fi
@@ -141,4 +145,3 @@ if [ "$keys_count" -gt 0 ] && [ "$src" != 'cache' ]; then
 fi
 
 printf '%s\n' "$keys"
-
