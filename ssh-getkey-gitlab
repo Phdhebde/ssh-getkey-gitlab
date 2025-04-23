@@ -60,6 +60,10 @@ sync_users() {
             [ -n "$username" ] && "$0" "$username"
         done
     done
+    if [ "$(id -u)" -eq 0 ] && [ -d "$cache_dir" ]; then
+        chown -R sshd:nogroup "$cache_dir" 2>/dev/null || :
+        chmod 700 "$cache_dir" 2>/dev/null || :
+    fi
     exit 0
 }
 
