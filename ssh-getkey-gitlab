@@ -1,22 +1,6 @@
 #!/bin/sh
-# vim: set ts=4:
-#
-# This script finds and prints authorized SSH public keys in GitLab for the
-# username specified as the first argument.
-#
-# The program must be owned by root and not writable by group or others.
-# It expects configuration file /etc/ssh/getkey-gitlab.conf.
-#
-# sshd_config for OpenSSH 6.2+:
-#
-#   AuthorizedKeysCommand /usr/local/bin/ssh-getkey-gitlab
-#   AuthorizedKeysCommandUser sshd
-#
-# Please report issues at <https://github.com/phdhebde/ssh-getkey-gitlab/issues>.
-
 # Patched version: GitLab IAM + Group check + auto account creation + title filter + ignore SSL
-# Note: user creation only runs if script is executed as root 
-# Use --sync-users to sync all users in allowed_groups
+# Note: user creation only runs if script is executed as root
 set -eu
 
 readonly PROGNAME='ssh-getkey-gitlab'
@@ -41,12 +25,16 @@ fi
 : ${minimum_uid:=1000}
 : ${timeout:=5}
 : ${cache_dir:="/var/cache/$PROGNAME"}
+: ${excluded_sync_user:=""}
 
 sync_users() {
     # Fix permissions if run as root
-    if [ "$(id -u)" -eq 0 ] && [ -d "$cache_dir" ]; then
-        chown -R sshd:nogroup "$cache_dir" 2>/dev/null || :
-        chmod 700 "$cache_dir" 2>/dev/null || :
+    if [ "$(id -u)" -eq 0 ]; then
+        if [ ! -d "$cache_dir" ]; then
+            mkdir -p "$cache_dir" || die "could not create $cache_dir"
+        fi
+        chmod 700 "$cache_dir"
+        chown sshd:nogroup "$cache_dir" 2>/dev/null || :
     fi
     log info "Starting user sync mode"
     IFS=','
@@ -57,13 +45,14 @@ sync_users() {
             --header="PRIVATE-TOKEN: $private_token" \
             "$gitlab_url/api/v4/groups/$gid/members/all?per_page=100") || continue
         echo "$members_json" | grep -o '"username":"[^"]\+' | cut -d\" -f4 | sort -u | while read -r username; do
-            [ -n "$username" ] && "$0" "$username"
+            [ "$username" != "$excluded_sync_user" ] && [ -n "$username" ] && "$0" "$username"
         done
     done
     if [ "$(id -u)" -eq 0 ] && [ -d "$cache_dir" ]; then
         chown -R sshd:nogroup "$cache_dir" 2>/dev/null || :
         chmod 700 "$cache_dir" 2>/dev/null || :
     fi
+    log info "User sync mode finished"
     exit 0
 }
 
@@ -72,7 +61,6 @@ case "${1:-}" in
     -V | --version) echo "$PROGNAME $VERSION"; exit 0;;
     --sync-users) sync_users;;
 esac
-
 
 
 if [ -z "${gitlab_url:-}" ]; then
